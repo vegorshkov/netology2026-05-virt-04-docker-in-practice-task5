@@ -1,0 +1,68 @@
+#cloud-config
+
+users:
+  - name: ubuntu
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    shell: /bin/bash
+    groups: docker
+    ssh_authorized_keys:
+      - ssh-ed25519 XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXpfv9JLaDQ0YmNZt2l+HNQqXu
+
+package_update: true
+packages:
+  - ca-certificates
+  - curl
+  - gnupg
+  - git
+
+runcmd:
+  # docker repo
+  - curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /usr/share/keyrings/docker.gpg
+  - echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" > /etc/apt/sources.list.d/docker.list
+  - apt-get update
+  - apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
+
+  # docker start
+  - systemctl enable docker
+  - systemctl start docker
+  - sleep 15
+  - docker version
+
+  # passwords (letters only)
+  - |
+      DB_PASS=$(tr -dc 'A-Za-z' </dev/urandom | head -c 16)
+      mkdir -p /opt/app
+      cat > /opt/app/.env <<EOF
+      MYSQL_ROOT_PASSWORD=$DB_PASS
+      MYSQL_DATABASE=virtd
+      MYSQL_USER=app
+      MYSQL_PASSWORD=$DB_PASS
+      DB_HOST=db
+      DB_PORT=3306
+      DB_NAME=virtd
+      EOF
+      chmod 600 /opt/app/.env
+
+  # app
+  - cd /opt/app
+  - git clone https://github.com/vegorshkov/netology2026-05-virt-04-docker-in-practice-task3.git .
+  - docker compose up -d --build
+
+  # backup script
+  - mkdir -p /opt/backup
+  - |
+      cat > /opt/backup/mysql-backup.sh <<'EOF'
+      #!/bin/bash
+      BACKUP_DIR="/opt/backup"
+      CONTAINER="mysql-db"
+      DB_NAME="virtd"
+      ENV_FILE="/opt/app/.env"
+      DB_PASS=$(grep MYSQL_PASSWORD "$ENV_FILE" | cut -d= -f2)
+      FILE="$BACKUP_DIR/backup_$(date +%Y%m%d_%H%M%S).sql"
+      docker exec "$CONTAINER" mysqldump -u app -p"$DB_PASS" "$DB_NAME" > "$FILE"
+      ls -1t $BACKUP_DIR/backup_*.sql 2>/dev/null | tail -n +11 | xargs -r rm -f
+      EOF
+  - chmod +x /opt/backup/mysql-backup.sh
+
+  # cron every minute
+  - crontab -l 2>/dev/null | { cat; echo "* * * * * /opt/backup/mysql-backup.sh"; } | crontab -
